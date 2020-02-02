@@ -24,7 +24,7 @@
   (:use common-lisp)
   (:size 3000)
   #+(or kcl ibcl) (:shadow rational)
-  #+(or sbcl clasp) (:shadow defconstant)
+  #+(or sbcl clasp mezzano) (:shadow defconstant)
   #+excl (:import-from excl arglist)
   #+Genera (:import-from zwei indentation)
   #+lcl3.0 (:import-from lcl arglist)

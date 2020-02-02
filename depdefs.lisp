@@ -44,7 +44,7 @@
 ;;; than EQL. This utility is taken from Alexandria library (Public
 ;;; Domain). Implementations which require that are sbcl and clasp.
 
-#+ (or sbcl clasp)
+#+ (or sbcl clasp mezzano)
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun %reevaluate-constant (name value test)
     (if (not (boundp name))

@@ -372,7 +372,7 @@
   (the short-float (* (the int16 value) #.(coerce (/ pi 180.0 64.0) 'short-float))))
 
 
-#+(or cmu sbcl clisp ecl clasp)
+#+(or cmu sbcl clisp ecl clasp mezzano)
 (progn
 
 ;;; This overrides the (probably incorrect) definition in clx.lisp.  Since PI
@@ -530,7 +530,7 @@
 
 ;;; MAKE-PROCESS-LOCK: Creating a process lock.
 
-#-(or sbcl (and cmu mp) (and ecl threads) (and clasp threads))
+#-(or sbcl (and cmu mp) (and ecl threads) (and clasp threads) mezzano)
 (defun make-process-lock (name)
   (declare (ignore name))
   nil)
@@ -551,6 +551,10 @@
 (defun make-process-lock (name)
   (mp:make-recursive-mutex name))
 
+#+mezzano
+(defun make-process-lock (name)
+  (mezzano.supervisor:make-mutex name))
+
 ;;; HOLDING-LOCK: Execute a body of code with a lock held.
 
 ;;; The holding-lock macro takes a timeout keyword argument.  EVENT-LISTEN
@@ -559,7 +563,7 @@
 
 ;; If you're not sharing DISPLAY objects within a multi-processing
 ;; shared-memory environment, this is sufficient
-#-(or sbcl (and CMU mp) (and ecl threads) (and clasp threads))
+#-(or sbcl (and CMU mp) (and ecl threads) (and clasp threads) mezzano)
 (defmacro holding-lock ((locator display &optional whostate &key timeout) &body body)
   (declare (ignore locator display whostate timeout))
   `(progn ,@body))
@@ -628,6 +632,19 @@
                                              `(:timeout ,timeout)))
      ,@body))
 
+#+mezzano
+(defun call-with-holding-lock (lock thunk)
+  ;; Some support for recursive locking...
+  (if (mezzano.supervisor:mutex-held-p lock)
+      (funcall thunk)
+      (mezzano.supervisor:with-mutex (lock)
+        (funcall thunk))))
+
+#+mezzano
+(defmacro holding-lock ((lock display &optional whostate &key timeout) &body body)
+  (declare (ignore display whostate timeout))
+  `(call-with-holding-lock ,lock (lambda () ,@body)))
+
 ;;; WITHOUT-ABORTS
 
 ;;; If you can inhibit asynchronous keyboard aborts inside the body of this
@@ -642,7 +659,7 @@
 ;;; Caller guarantees that PROCESS-WAKEUP will be called after the predicate's
 ;;; value changes.
 
-#-(or (and sb-thread sbcl) (and cmu mp) (and ecl threads) (and clasp threads))
+#-(or (and sb-thread sbcl) (and cmu mp) (and ecl threads) (and clasp threads) mezzano)
 (defun process-block (whostate predicate &rest predicate-args)
   (declare (ignore whostate))
   (or (apply predicate predicate-args)
@@ -690,6 +707,15 @@
      (return))
      (mp:process-yield)))
 
+#+mezzano
+(defun process-block (whostate predicate &rest predicate-args)
+  (declare (ignore whostate))
+  (declare (type function predicate))
+  (loop
+   (when (apply predicate predicate-args)
+     (return))
+     (mezzano.supervisor:thread-yield)))
+
 ;;; FIXME: the below implementation for threaded PROCESS-BLOCK using
 ;;; queues and condition variables might seem better, but in fact it
 ;;; turns out to make performance extremely suboptimal, at least as
@@ -725,7 +751,7 @@
 
 (declaim (inline process-wakeup))
 
-#-(or (and sbcl sb-thread) (and cmu mp) (and ecl threads) (and clasp threads))
+#-(or (and sbcl sb-thread) (and cmu mp) (and ecl threads) (and clasp threads) mezzano)
 (defun process-wakeup (process)
   (declare (ignore process))
   nil)
@@ -750,6 +776,11 @@
   (declare (ignore process))
   (mp:process-yield))
 
+#+mezzano
+(defun process-wakeup (process)
+  (declare (ignore process))
+  (mezzano.supervisor:thread-yield))
+
 #+(or)
 (defun process-wakeup (process)
   (declare (ignore process))
@@ -768,7 +799,7 @@
 
 ;;; Default return NIL, which is acceptable even if there is a scheduler.
 
-#-(or sbcl (and cmu mp) (and ecl threads) (and clasp threads))
+#-(or sbcl (and cmu mp) (and ecl threads) (and clasp threads) mezzano)
 (defun current-process ()
   nil)
 
@@ -780,9 +811,13 @@
 (defun current-process ()
   sb-thread:*current-thread*)
 
+#+mezzano
+(defun current-process ()
+  (mezzano.supervisor:current-thread))
+
 ;;; WITHOUT-INTERRUPTS -- provide for atomic operations.
 
-#-(or ecl cmu sbcl clasp)
+#-(or ecl cmu sbcl clasp mezzano)
 (defmacro without-interrupts (&body body)
   `(progn ,@body))
 
@@ -804,6 +839,14 @@
 #+sbcl
 (defmacro without-interrupts (&body body)
   `(sb-thread:with-recursive-lock (*without-interrupts-sic-lock*)
+     ,@body))
+
+#+mezzano
+(defvar *without-interrupts-sic-lock*
+  (make-process-lock "lock simulating *without-interrupts*"))
+#+mezzano
+(defmacro without-interrupts (&body body)
+  `(holding-lock (*without-interrupts-sic-lock* nil)
      ,@body))
 
 ;;; CONDITIONAL-STORE:
@@ -858,7 +901,7 @@
 ;;; OPEN-X-STREAM - create a stream for communicating to the appropriate X
 ;;; server
 
-#-(or CMU sbcl ecl clisp clasp)
+#-(or CMU sbcl ecl clisp clasp mezzano)
 (defun open-x-stream (host display protocol)
   host display protocol ;; unused
   (error "OPEN-X-STREAM not implemented yet."))
@@ -962,6 +1005,16 @@
                 fd))))))
     (system:make-fd-stream stream-fd :input t :output t :element-type '(unsigned-byte 8))))
 
+#+mezzano
+(defun open-x-stream (host display protocol)
+  (declare (ignore protocol)
+           (type (integer 0) display))
+  (when (string= host "")
+    (setf host "localhost"))
+  (mezzano.network.tcp:tcp-stream-connect
+   host (+ *x-tcp-port* display)
+   :element-type '(unsigned-byte 8)))
+
 ;;; BUFFER-READ-DEFAULT for CMU Common Lisp.
 ;;;
 ;;;    If timeout is 0, then we call LISTEN to see if there is any input.
@@ -986,7 +1039,7 @@
                 vector start (- end start))
          nil)))
 
-#+(or ecl clisp clasp)
+#+(or ecl clisp clasp mezzano)
 (defun buffer-read-default (display vector start end timeout)
   (declare (type display display)
            (type buffer-bytes vector)
@@ -1009,7 +1062,7 @@
 ;;;	receiving all data from the X Window System server.
 ;;;	You are encouraged to write a specialized version of
 ;;;	buffer-read-default that does block transfers.
-#-(or CMU sbcl ecl clisp clasp)
+#-(or CMU sbcl ecl clisp clasp mezzano)
 (defun buffer-read-default (display vector start end timeout)
   (declare (type display display)
            (type buffer-bytes vector)
@@ -1042,7 +1095,7 @@
   (system:output-raw-bytes (display-output-stream display) vector start end)
   nil)
 
-#+(or sbcl ecl clisp clasp)
+#+(or sbcl ecl clisp clasp mezzano)
 (defun buffer-write-default (vector display start end)
   (declare (type buffer-bytes vector)
            (type display display)
@@ -1057,7 +1110,7 @@
 ;;;	You are STRONGLY encouraged to write a specialized version
 ;;;	of buffer-write-default that does block transfers.
 
-#-(or CMU sbcl clisp ecl clasp)
+#-(or CMU sbcl clisp ecl clasp mezzano)
 (defun buffer-write-default (vector display start end)
   ;; The default buffer write function for use with common-lisp streams
   (declare (type buffer-bytes vector)
@@ -1100,7 +1153,7 @@
 ;;; :TIMEOUT if it times out, NIL otherwise.
 
 ;;; The default implementation
-#-(or cmu sbcl clisp (and ecl serve-event))
+#-(or cmu sbcl clisp (and ecl serve-event) mezzano)
 (progn
   ;; Issue a warning to incentivize providing better implementation.
   (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -1166,6 +1219,20 @@
                #+cmu (system:wait-until-fd-usable (system:fd-stream-fd stream) :input timeout))
            nil)
           (T :timeout))))
+
+#+mezzano
+(defun buffer-input-wait-default (display timeout)
+  (declare (type display display)
+           (type (or null number) timeout))
+  (let ((stream (display-input-stream display)))
+    (declare (type (or null stream) stream))
+    (cond ((null stream))
+          ((listen stream) nil)
+          ((eql timeout 0) :timeout)
+          (T (if (mezzano.supervisor:event-wait-for (stream :timeout timeout)
+                   (listen stream))
+                 nil
+                 :timeout)))))
 
 ;;; BUFFER-LISTEN-DEFAULT - returns T if there is input available for the
 ;;; buffer. This should never block, so it can be called from the scheduler.
@@ -1313,9 +1380,9 @@
 ;; dispatching, not just type checking.  -- Ram.
 
 (defmacro type? (object type)
-  #+(or cmu sbcl clisp)
+  #+(or cmu sbcl clisp mezzano)
   `(typep ,object ,type)
-  #-(or cmu sbcl clisp)
+  #-(or cmu sbcl clisp mezzano)
   (if (not (constantp type))
       `(typep ,object ,type)
       (progn
@@ -1569,9 +1636,9 @@
   "Return the same hostname as gethostname(3) would"
   ;; machine-instance probably works on a lot of lisps, but clisp is not
   ;; one of them
-  #+(or cmu sbcl ecl clasp) (machine-instance)
+  #+(or cmu sbcl ecl clasp mezzano) (machine-instance)
   #+clisp (let ((s (machine-instance))) (subseq s 0 (position #\Space s)))
-  #-(or cmu sbcl ecl clisp clasp) (error "get-host-name not implemented"))
+  #-(or cmu sbcl ecl clisp clasp mezzano) (error "get-host-name not implemented"))
 
 (defun homedir-file-pathname (name)
   (and #-(or unix mach) (search "Unix" (software-type) :test #'char-equal)
@@ -1602,7 +1669,7 @@
       (homedir-file-pathname ".Xauthority")))
 
 ;;; this particular defaulting behaviour is typical to most Unices, I think
-#+unix
+#+(or unix mezzano)
 (defun get-default-display (&optional display-name)
   "Parse the argument DISPLAY-NAME, or the environment variable $DISPLAY
 if it is NIL.  Display names have the format
